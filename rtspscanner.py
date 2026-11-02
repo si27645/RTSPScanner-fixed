@@ -25,7 +25,38 @@ import subprocess
 import requests
 import json
 from PIL import Image
-from portscan import PortScan
+import socket, ipaddress
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+class PortScan:
+    class _QStub:
+        def __init__(self):
+            import threading
+            self.mutex = threading.Lock()
+            self.unfinished_tasks = 0
+            self.queue = []
+            self.not_full = threading.Condition(self.mutex)
+    def __init__(self, address, ports, stdout=True, timeout=1, workers=200):
+        self.address = address
+        self.ports = [int(p.strip()) for p in str(ports).split(",") if p.strip()]
+        self.stdout = stdout; self.timeout = timeout; self.workers = workers
+        self.q = self._QStub()
+    def _check(self, ip, port):
+        try:
+            with socket.create_connection((str(ip), port), timeout=self.timeout):
+                return {"ip": str(ip), "port": port, "open": True}
+        except Exception:
+            return {"ip": str(ip), "port": port, "open": False}
+    def run(self):
+        try: targets = list(ipaddress.ip_network(self.address, strict=False).hosts())
+        except ValueError: targets = [ipaddress.ip_address(self.address)]
+        results = []
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            for f in as_completed([ex.submit(self._check, ip, p) for ip in targets for p in self.ports]):
+                r = f.result()
+                results.append(r)
+        return [r for r in results if r["open"]]
+
     
 class RTSPScanner:
     def __init__(self,verbose=False,wspace="-"):
@@ -81,14 +112,6 @@ class RTSPScanner:
     def scanner(self):
         self.portscan = PortScan(self.address,self.ports,stdout=False)
         results = self.portscan.run()
-        with self.portscan.q.mutex:
-            unfinished = self.portscan.q.unfinished_tasks - len(self.portscan.q.queue)
-            if unfinished <= 0:
-                if unfinished < 0:
-                    raise ValueError('task_done() called too many times')
-                self.portscan.q.unfinished_tasks = unfinished
-                self.portscan.q.queue.clear()
-                self.portscan.q.not_full.notify_all()
         #if self.verbose:
             #print(results)
         for result in results:
